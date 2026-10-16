@@ -64,7 +64,7 @@ fn built_luna_posts_one_complete_request_and_returns_resolved_model()
     let model = "openai/gpt-6-luna-decisions";
     let run = scripted(answer(model, Some(json!({"original":0.2,"summary":0.8}))));
     let origin = run.origin().expect("scripted origin").to_owned();
-    let output = run.call("decide.choose", input("openrouter-luna", model, true))?;
+    let output = run.call("decide.choose", input("openrouter-luna", model, false))?;
     assert_eq!(output.status, 0, "{}", output.stderr);
     let sent = output.http_request.as_ref().expect("one request");
     assert_eq!(output.http_calls.len(), 1);
@@ -99,23 +99,38 @@ fn built_jev_posts_one_complete_request_without_guest_credentials()
 }
 
 #[test]
-fn built_refusal_and_missing_required_probabilities_never_return_choice()
+fn built_luna_refuses_required_probabilities_before_http() -> Result<(), Box<dyn std::error::Error>>
+{
+    let output = Harness::<Decide>::get(component()).call(
+        "decide.choose",
+        input("openrouter-luna", "openai/gpt-6-luna-decisions", true),
+    )?;
+    assert_eq!(output.status, 0, "{}", output.stderr);
+    assert!(output.http_calls.is_empty());
+    assert!(output.http_request.is_none());
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        value,
+        json!({"refused":true,"backend":"openrouter-luna","model":"openai/gpt-6-luna-decisions"})
+    );
+    assert!(value.get("choice").is_none());
+    Ok(())
+}
+
+#[test]
+fn built_missing_required_probabilities_refuse_without_choice()
 -> Result<(), Box<dyn std::error::Error>> {
-    let model = "openai/gpt-6-luna-decisions";
-    for body in [
-        json!({"model":model,"answers":{"decision":{"type":"refusal"}}}),
-        answer(model, None),
-    ] {
-        let output = scripted(body).call("decide.choose", input("openrouter-luna", model, true))?;
-        assert_eq!(output.status, 0, "{}", output.stderr);
-        assert_eq!(output.http_calls.len(), 1);
-        let value: Value = serde_json::from_slice(&output.stdout)?;
-        assert_eq!(
-            value,
-            json!({"refused":true,"backend":"openrouter-luna","model":model})
-        );
-        assert!(value.get("choice").is_none());
-    }
+    let model = "typesafe/jev-1.13";
+    let output = scripted(answer(model, None))
+        .call("decide.choose", input("openrouter-jev", model, true))?;
+    assert_eq!(output.status, 0, "{}", output.stderr);
+    assert_eq!(output.http_calls.len(), 1);
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        value,
+        json!({"refused":true,"backend":"openrouter-jev","model":model})
+    );
+    assert!(value.get("choice").is_none());
     Ok(())
 }
 
@@ -124,6 +139,7 @@ fn built_malformed_answers_fail_without_a_choice() -> Result<(), Box<dyn std::er
     let model = "openai/gpt-6-luna-decisions";
     for body in [
         json!({"model":model,"answers":{}}),
+        json!({"model":model,"answers":{"decision":{"type":"refusal"}}}),
         json!({"model":model,"answers":{"decision":{"type":"choice","choice":"unknown"}}}),
         answer(model, Some(json!({"original":0.1,"summary":null}))),
         answer(model, Some(json!({"original":0.1,"summary":0.1}))),
@@ -139,16 +155,16 @@ fn built_malformed_answers_fail_without_a_choice() -> Result<(), Box<dyn std::er
 
 #[test]
 fn built_null_probabilities_refuse_without_a_choice() -> Result<(), Box<dyn std::error::Error>> {
-    let model = "openai/gpt-6-luna-decisions";
+    let model = "typesafe/jev-1.13";
     let mut body = answer(model, None);
     body["answers"]["decision"]["probabilities"] = Value::Null;
-    let output = scripted(body).call("decide.choose", input("openrouter-luna", model, true))?;
+    let output = scripted(body).call("decide.choose", input("openrouter-jev", model, true))?;
     assert_eq!(output.status, 0, "{}", output.stderr);
     assert_eq!(output.http_calls.len(), 1);
     let value: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(
         value,
-        json!({"refused":true,"backend":"openrouter-luna","model":model})
+        json!({"refused":true,"backend":"openrouter-jev","model":model})
     );
     assert!(value.get("choice").is_none());
     Ok(())
@@ -214,6 +230,31 @@ fn built_denied_egress_and_throttle_fail_without_a_choice() -> Result<(), Box<dy
     assert_ne!(throttled.status, 0);
     assert!(throttled.stdout.is_empty());
     assert_eq!(throttled.http_calls.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn built_endpoint_error_statuses_have_a_generic_diagnostic()
+-> Result<(), Box<dyn std::error::Error>> {
+    let model = "typesafe/jev-1.13";
+    for status in [400, 404, 422] {
+        let run = Harness::<Decide>::get(component()).http(HttpScript::new(
+            "localhost",
+            "POST",
+            response(status, json!({"error":"sk-synthetic vendor body"})),
+        ));
+        let origin = run.origin().expect("scripted origin").to_owned();
+        let output = run
+            .settings(json!({"baseUrl":origin}))
+            .call("decide.choose", input("openrouter-jev", model, false))?;
+        assert_ne!(output.status, 0);
+        assert_eq!(
+            output.stderr,
+            "decision endpoint returned an error status\n"
+        );
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.http_calls.len(), 1);
+    }
     Ok(())
 }
 

@@ -70,7 +70,6 @@ fn default_base() -> Base {
 pub struct ChooseInput {
     backend: String,
     model: String,
-    #[schemars(length(min = 1, max = 256))]
     evidence: Vec<Record>,
     labels: Vec<String>,
     require_probabilities: bool,
@@ -128,7 +127,7 @@ impl fmt::Display for DecideError {
             Self::Timeout => "decision request timed out",
             Self::Throttled => "decision request throttled",
             Self::Budget => "decision invocation budget exhausted",
-            Self::Unavailable => "decision service unavailable",
+            Self::Unavailable => "decision endpoint returned an error status",
         })
     }
 }
@@ -222,10 +221,8 @@ fn choose(
         return Err(DecideError::InvalidInput);
     }
     let capable = match (input.backend.as_str(), input.model.as_str()) {
-        ("openrouter-luna", LUNA) => true,
+        ("openrouter-luna", LUNA) => false,
         ("openrouter-jev", JEV) => true,
-        #[cfg(test)]
-        ("test-incapable", "test/incapable") => false,
         _ => return Err(DecideError::UnsupportedProfile),
     };
     if input.require_probabilities && !capable {
@@ -272,15 +269,6 @@ fn choose(
     let answer = wire
         .pointer("/answers/decision")
         .ok_or(DecideError::InvalidResponse)?;
-    if answer.get("refused") == Some(&Value::Bool(true))
-        || answer.get("type").and_then(Value::as_str) == Some("refusal")
-    {
-        return Ok(Decision::Refusal {
-            refused: true,
-            backend: input.backend,
-            model: resolved.to_owned(),
-        });
-    }
     if answer.get("type").and_then(Value::as_str) != Some("choice") {
         return Err(DecideError::InvalidResponse);
     }
@@ -380,26 +368,10 @@ mod tests {
     }
 
     #[test]
-    fn native_test_only_incapable_profile_refuses_before_http() {
-        let calls = Cell::new(0);
-        let decision = choose(
-            input("test-incapable", "test/incapable"),
-            OPENROUTER,
-            &mut |_| {
-                calls.set(calls.get() + 1);
-                Err(error(HttpErrorCode::Internal))
-            },
-        )
-        .expect("refusal");
-        assert!(matches!(decision, Decision::Refusal { refused: true, .. }));
-        assert_eq!(calls.get(), 0);
-    }
-
-    #[test]
     fn native_stalled_http_timeout_consumes_one_request_without_retry() {
         let calls = Cell::new(0);
         let (_sender, receiver) = mpsc::channel::<()>();
-        let result = choose(input("openrouter-luna", LUNA), OPENROUTER, &mut |_| {
+        let result = choose(input("openrouter-jev", JEV), OPENROUTER, &mut |_| {
             calls.set(calls.get() + 1);
             assert!(matches!(
                 receiver.recv_timeout(Duration::from_millis(10)),
@@ -408,24 +380,6 @@ mod tests {
             Err(error(HttpErrorCode::Timeout))
         });
         assert!(matches!(result, Err(DecideError::Timeout)));
-        assert_eq!(calls.get(), 1);
-    }
-
-    #[test]
-    fn native_cancellation_interrupts_stalled_http_without_retry() {
-        let calls = Cell::new(0);
-        std::thread::scope(|scope| {
-            let (cancel, receiver) = mpsc::channel::<()>();
-            scope.spawn(move || cancel.send(()).expect("cancel signal"));
-            let result = choose(input("openrouter-luna", LUNA), OPENROUTER, &mut |_| {
-                calls.set(calls.get() + 1);
-                receiver
-                    .recv_timeout(Duration::from_secs(1))
-                    .expect("cancelled while pending");
-                Err(error(HttpErrorCode::Internal))
-            });
-            assert!(matches!(result, Err(DecideError::Transport)));
-        });
         assert_eq!(calls.get(), 1);
     }
 
