@@ -293,6 +293,13 @@ fn choose(
     }
     let probabilities = match answer.get("probabilities") {
         None => None,
+        Some(Value::Null) => {
+            return Ok(Decision::Refusal {
+                refused: true,
+                backend: input.backend,
+                model: resolved.to_owned(),
+            });
+        }
         Some(Value::Object(map)) => {
             if map.len() != input.labels.len() || map.keys().any(|key| !input.labels.contains(key))
             {
@@ -425,15 +432,31 @@ mod tests {
     #[test]
     fn native_invocation_budget_charges_one_request_and_never_retries() {
         let calls = Cell::new(0);
-        let mut budget = 1_u32;
-        let result = choose(input("openrouter-jev", JEV), OPENROUTER, &mut |_| {
+        let budget = Cell::new(1_u32);
+        let mut send = |_: Request| {
             calls.set(calls.get() + 1);
-            assert_eq!(budget, 1);
-            budget -= 1;
-            Err(error(HttpErrorCode::HostCallLimit))
-        });
-        assert!(matches!(result, Err(DecideError::Budget)));
-        assert_eq!(budget, 0);
-        assert_eq!(calls.get(), 1);
+            if budget.get() == 0 {
+                return Err(error(HttpErrorCode::HostCallLimit));
+            }
+            budget.set(budget.get() - 1);
+            Ok(Response {
+                status: 200,
+                headers: vec![],
+                body: serde_json::to_vec(&json!({
+                    "model": JEV,
+                    "answers": {"decision": {
+                        "type": "choice", "choice": "summary",
+                        "probabilities": {"original": 0.2, "summary": 0.8}
+                    }}
+                }))
+                .expect("synthetic answer"),
+            })
+        };
+        let first = choose(input("openrouter-jev", JEV), OPENROUTER, &mut send);
+        assert!(matches!(first, Ok(Decision::Success { ref choice, .. }) if choice == "summary"));
+        assert_eq!(budget.get(), 0);
+        let next = choose(input("openrouter-jev", JEV), OPENROUTER, &mut send);
+        assert!(matches!(next, Err(DecideError::Budget)));
+        assert_eq!(calls.get(), 2);
     }
 }

@@ -10,7 +10,7 @@ fn component() -> std::path::PathBuf {
 }
 
 fn input(backend: &str, model: &str, require: bool) -> Value {
-    json!({"backend":backend,"model":model,"evidence":{"ageMs":17,"tool":"check"},"labels":["original","summary"],"requireProbabilities":require})
+    json!({"backend":backend,"model":model,"evidence":[{"tool":"bash","outcome":"failure","exitStatus":1,"ageMs":17,"bytes":512,"pinned":false}],"labels":["original","summary"],"requireProbabilities":require})
 }
 
 fn response(status: u16, body: Value) -> Response {
@@ -48,14 +48,13 @@ fn assert_one_request(request: &dekopon_provider_sdk::provider::Request, uri: &s
             .iter()
             .all(|h| !h.name.eq_ignore_ascii_case("authorization"))
     );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&request.body).unwrap(),
-        json!({
-            "model":model,
-            "questions":{"decision":{"type":"choice","instructions":"Choose the best matching label for the supplied evidence.","criteria":{"original":"original","summary":"summary"}}},
-            "state":{"ageMs":17,"tool":"check"}
-        })
-    );
+    let expected = concat!(
+        "{\"model\":\"MODEL\",",
+        "\"questions\":{\"decision\":{\"criteria\":{\"original\":\"original\",\"summary\":\"summary\"},",
+        "\"instructions\":\"Choose the best matching label for the supplied evidence.\",\"type\":\"choice\"}},",
+        "\"state\":{\"records\":[{\"ageMs\":17,\"bytes\":512,\"exitStatus\":1,\"outcome\":\"failure\",\"pinned\":false,\"tool\":\"bash\"}]}}"
+    ).replace("MODEL", model);
+    assert_eq!(request.body, expected.as_bytes());
 }
 
 #[test]
@@ -134,6 +133,47 @@ fn built_malformed_answers_fail_without_a_choice() -> Result<(), Box<dyn std::er
         assert_ne!(output.status, 0);
         assert!(output.stdout.is_empty());
         assert_eq!(output.http_calls.len(), 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn built_null_probabilities_refuse_without_a_choice() -> Result<(), Box<dyn std::error::Error>> {
+    let model = "openai/gpt-6-luna-decisions";
+    let mut body = answer(model, None);
+    body["answers"]["decision"]["probabilities"] = Value::Null;
+    let output = scripted(body).call("decide.choose", input("openrouter-luna", model, true))?;
+    assert_eq!(output.status, 0, "{}", output.stderr);
+    assert_eq!(output.http_calls.len(), 1);
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        value,
+        json!({"refused":true,"backend":"openrouter-luna","model":model})
+    );
+    assert!(value.get("choice").is_none());
+    Ok(())
+}
+
+#[test]
+fn built_free_text_url_and_object_evidence_refuse_before_http()
+-> Result<(), Box<dyn std::error::Error>> {
+    let model = "openai/gpt-6-luna-decisions";
+    let mut note = input("openrouter-luna", model, true);
+    note["evidence"][0]["note"] = json!("see https://example.com/?token=sk-synthetic");
+    let mut tool = input("openrouter-luna", model, true);
+    tool["evidence"][0]["tool"] = json!("https://example.com");
+    let mut object = input("openrouter-luna", model, true);
+    object["evidence"] = json!({"tool":"bash","outcome":"failure","exitStatus":1,"ageMs":17,"bytes":512,"pinned":false});
+    for payload in [note, tool, object] {
+        let output = Harness::<Decide>::get(component()).call("decide.choose", payload)?;
+        assert_eq!(output.status, 2, "{}", output.stderr);
+        assert_eq!(
+            output.stderr.trim(),
+            "the input does not match the capability's input schema"
+        );
+        assert!(output.stdout.is_empty());
+        assert!(output.http_calls.is_empty());
+        assert!(output.http_request.is_none());
     }
     Ok(())
 }
