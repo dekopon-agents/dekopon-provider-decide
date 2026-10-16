@@ -15,7 +15,7 @@ use std::io::Write;
 const OPENROUTER: Base = Base::from_static("https://openrouter.ai");
 const LUNA: &str = "openai/gpt-6-luna-decisions";
 const JEV: &str = "typesafe/jev-1.13";
-const MAX_EVIDENCE: usize = 16 * 1024;
+const MAX_RECORDS: usize = 256;
 const MAX_LABELS: usize = 32;
 const MAX_LABEL_BYTES: usize = 128;
 const TOLERANCE: f64 = 0.01;
@@ -70,9 +70,38 @@ fn default_base() -> Base {
 pub struct ChooseInput {
     backend: String,
     model: String,
-    evidence: Value,
+    #[schemars(length(min = 1, max = 256))]
+    evidence: Vec<Record>,
     labels: Vec<String>,
     require_probabilities: bool,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Record {
+    tool: Tool,
+    outcome: Outcome,
+    exit_status: Option<u8>,
+    age_ms: u64,
+    bytes: u64,
+    pinned: bool,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum Tool {
+    Bash,
+    #[serde(rename = "none")]
+    Absent,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum Outcome {
+    Success,
+    Failure,
+    #[serde(rename = "none")]
+    Absent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,15 +208,15 @@ fn choose(
 ) -> Result<Decision, DecideError> {
     if input.labels.len() < 2
         || input.labels.len() > MAX_LABELS
-        || input.evidence.is_null()
-        || serde_json::to_vec(&input.evidence)
-            .map_err(|_| DecideError::InvalidInput)?
-            .len()
-            > MAX_EVIDENCE
-        || input
-            .labels
-            .iter()
-            .any(|label| label.is_empty() || label.len() > MAX_LABEL_BYTES || label.trim() != label)
+        || input.evidence.is_empty()
+        || input.evidence.len() > MAX_RECORDS
+        || input.labels.iter().any(|label| {
+            label.is_empty()
+                || label.len() > MAX_LABEL_BYTES
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        })
         || input.labels.iter().collect::<BTreeSet<_>>().len() != input.labels.len()
     {
         return Err(DecideError::InvalidInput);
@@ -210,7 +239,7 @@ fn choose(
     let body = serde_json::to_vec(&json!({
         "model": input.model,
         "questions": {"decision": {"type": "choice", "instructions": "Choose the best matching label for the supplied evidence.", "criteria": criteria}},
-        "state": input.evidence,
+        "state": {"records": input.evidence},
     })).map_err(|_| DecideError::InvalidInput)?;
     let uri = base
         .join("/api/alpha/decisions")
@@ -323,7 +352,14 @@ mod tests {
         ChooseInput {
             backend: backend.into(),
             model: model.into(),
-            evidence: json!({"tool":"check"}),
+            evidence: vec![Record {
+                tool: Tool::Bash,
+                outcome: Outcome::Failure,
+                exit_status: Some(1),
+                age_ms: 17,
+                bytes: 512,
+                pinned: false,
+            }],
             labels: vec!["original".into(), "summary".into()],
             require_probabilities: true,
         }
