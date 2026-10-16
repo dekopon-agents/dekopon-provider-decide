@@ -6,7 +6,7 @@ This repository builds one advisory OpenRouter Decisions Wasm component. This fi
 
 - Outputs are advisory script data, never Cedar permissions. The only destination is the owner's `providerSettings.decide.baseUrl` or the OpenRouter default; the broker's grant decides whether egress is allowed.
 - Never accept a URL or credential in a question or evidence. Never set `authorization` in the guest; the broker injects it after destination validation. Never echo response bodies or secrets in errors.
-- Only native OpenRouter Decisions models are accepted. No direct OpenAI endpoint or chat fallback. A refusal has no choice. The OpenRouter Decisions reference documents optional Jev choice probabilities; Luna's model slug comes from IDEA-0009 research, but probability support is unverified. Probability-required Luna requests refuse before HTTP until an authorized live probe establishes support.
+- Only native OpenRouter Decisions models are accepted. No direct OpenAI endpoint or chat fallback. A refusal has no choice. The [OpenRouter Decisions reference](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request), read 2026-10-16, documents optional Jev choice probabilities and resolved model `typesafe/jev-1.13-20260917`; Luna's model slug comes from IDEA-0009 research, but probability support is unverified. Probability-required Luna requests refuse before HTTP until an authorized live probe establishes support.
 
 ## Build and verify
 
