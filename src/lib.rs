@@ -280,14 +280,7 @@ fn choose(
         return Err(DecideError::InvalidResponse);
     }
     let probabilities = match answer.get("probabilities") {
-        None => None,
-        Some(Value::Null) => {
-            return Ok(Decision::Refusal {
-                refused: true,
-                backend: input.backend,
-                model: resolved.to_owned(),
-            });
-        }
+        None | Some(Value::Null) => None,
         Some(Value::Object(map)) => {
             if map.len() != input.labels.len() || map.keys().any(|key| !input.labels.contains(key))
             {
