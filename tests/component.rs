@@ -154,10 +154,22 @@ fn built_malformed_answers_fail_without_a_choice() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn built_null_probabilities_refuse_without_a_choice() -> Result<(), Box<dyn std::error::Error>> {
+fn built_null_probabilities_keep_the_choice_unless_a_distribution_is_required()
+-> Result<(), Box<dyn std::error::Error>> {
     let model = "typesafe/jev-1.13";
     let mut body = answer(model, None);
     body["answers"]["decision"]["probabilities"] = Value::Null;
+
+    let output =
+        scripted(body.clone()).call("decide.choose", input("openrouter-jev", model, false))?;
+    assert_eq!(output.status, 0, "{}", output.stderr);
+    assert_eq!(output.http_calls.len(), 1);
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        value,
+        json!({"choice":"summary","backend":"openrouter-jev","model":model})
+    );
+
     let output = scripted(body).call("decide.choose", input("openrouter-jev", model, true))?;
     assert_eq!(output.status, 0, "{}", output.stderr);
     assert_eq!(output.http_calls.len(), 1);
